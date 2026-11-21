@@ -10,7 +10,6 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-
 import java.math.BigDecimal;
 import java.security.SecureRandom;
 
@@ -19,12 +18,15 @@ import java.security.SecureRandom;
 @RequiredArgsConstructor
 public class AccountService {
     private final AccountRepository accountRepository;
-    private static SecureRandom random = new SecureRandom();
+    private static final SecureRandom secureRandom = new SecureRandom();
+    private static final int MAX_GENERATION_ATTEMPTS = 10;
 
+    // TODO: Handle race condition when concurrent requests generate the same account number.
+    // Consider adding Spring Retry (@Retryable on DataIntegrityViolationException) or using DB Sequence / Snowflake ID.
     public AccountResponse createAccount(@Valid CreateAccountRequest request) {
         log.info("BEGIN - Creating account for user: {}", request.getEmail());
 
-        if(accountRepository.existByEmail(request.getEmail())) {
+        if(accountRepository.existsByEmail(request.getEmail())) {
             throw new RuntimeException("Account already exists for email: " + request.getEmail());
         }
 
@@ -47,14 +49,97 @@ public class AccountService {
         return mapToResponse(savedAccount);
     }
 
-    // 12-digit unique account number generator
+    /**
+     * Get account by account number
+     * @param accountNumber accountNumber
+     * @return AccountResponse
+     */
+    public AccountResponse getAccount(String accountNumber) {
+        Account account = accountRepository.findByAccountNumber(accountNumber)
+                .orElseThrow(() -> new RuntimeException("Account not found for account number: " + accountNumber));
+
+        return mapToResponse(account);
+    }
+
+    /**
+     * Get account balance by account number
+     * @param accountNumber accountNumber
+     * @return 2-digit precision, 2-digit scale
+     */
+    public BigDecimal getBalance(String accountNumber) {
+        Account account = accountRepository.findByAccountNumber(accountNumber)
+                .orElseThrow(() -> new RuntimeException("Account not found for account number: " + accountNumber));
+
+        return account.getBalance();
+    }
+
+    /**
+     * Block account - called by Fraud detection service via Kafka
+     * @param accountNumber accountNumber
+     */
+    public void blockAccount(String accountNumber) {
+        log.info("Blocking account for account number: {}", accountNumber);
+        Account account = accountRepository.findByAccountNumber(accountNumber)
+                .orElseThrow(() -> new RuntimeException("Account not found for account number: " + accountNumber));
+        account.setStatus(AccountStatus.BLOCKED);
+        accountRepository.save(account);
+    }
+
+    /**
+     * Deduct balance from the sender account
+     * @param accountNumber accountNumber
+     * @param amount amount to credit
+     */
+    public void deductBalance(String accountNumber, BigDecimal amount) {
+        log.info("BEGIN - Deducting balance for account number: {} amount: {}", accountNumber, amount);
+        Account account = accountRepository.findByAccountNumber(accountNumber)
+                .orElseThrow(() -> new RuntimeException("Account not found for account number: " + accountNumber));
+
+        if(account.getStatus() != AccountStatus.ACTIVE) {
+            throw new RuntimeException("Account is not active" + accountNumber);
+        }
+
+        if(account.getBalance().compareTo(amount) < 0) {
+            throw new RuntimeException("Insufficient balance for account: " + accountNumber);
+        }
+
+        account.setBalance(account.getBalance().subtract(amount));
+        accountRepository.save(account);
+        log.info("END - Balance deducted for account number: {} amount: {}", accountNumber, amount);
+    }
+
+    /**
+     * Credit balance called by Transaction Service via Kafka
+     * @param accountNumber accountNumber
+     * @param amount amount to credit
+     */
+    public void creditBalance(String accountNumber, BigDecimal amount) {
+        log.info("BEGIN - Crediting balance for account number: {} amount: {}", accountNumber, amount);
+        Account account = accountRepository.findByAccountNumber(accountNumber)
+                .orElseThrow(() -> new RuntimeException("Account not found for account number: " + accountNumber));
+
+        account.setBalance(account.getBalance().add(amount));
+        accountRepository.save(account);
+        log.info("END - Balance credited for account number: {} amount: {}", accountNumber, amount);
+    }
+
+
+
+    /**
+     * Generates a unique 12-digit account number
+     * @return unique account number
+     */
     private String generateAccountNumber() {
-        String accountNumber;
-        do {
-            long number = random.nextLong(1_000_000_000_000L);
-            accountNumber = String.format("%012d", number);
-        } while (accountRepository.existByAccountNumber(accountNumber));
-        return accountNumber;
+        for (int attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+            long number = secureRandom.nextLong(1_000_000_000_000L);
+            String accountNumber = String.format("%012d", number);
+
+            if (!accountRepository.existsByAccountNumber(accountNumber)) {
+                return accountNumber;
+            }
+            log.warn("Account number collision detected on attempt {}", attempt);
+        }
+        throw new IllegalStateException("Failed to generate unique account number after " + MAX_GENERATION_ATTEMPTS + " attempts");
     }
 
     // TODO: Implement Mapper for mapping between Account and AccountResponse
