@@ -13,7 +13,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
@@ -71,6 +73,18 @@ public class TransactionService {
         log.info("SAGA STEP 2 - Transaction initiated event published to Kafka: {}", savedTransaction.getId());
 
         return mapToResponse(savedTransaction);
+    }
+
+    public TransactionResponse getTransaction(String id) {
+        Transaction transaction = transactionRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Transaction not found with id: " + id));
+        return mapToResponse(transaction);
+    }
+
+    public List<TransactionResponse> getTransactionHistory(String accountNumber) {
+        return transactionRepository.findBySenderAccountNumberOrderByCreatedAtDesc(accountNumber).stream()
+                .map(this::mapToResponse)
+                .collect(Collectors.toList());
     }
 
     private TransactionResponse mapToResponse(Transaction transaction) {
